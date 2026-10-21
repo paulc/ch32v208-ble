@@ -13,8 +13,20 @@
 //! Because the library relies on `sp` pointing at this frame, `LLE_IRQLibHandler`
 //! must be called directly from the assembly below (not through a Rust wrapper).
 //!
-//! The only change from the WCH assembly is a call to `ble_irq_wake` before the
-//! library handler, so the TMOS task is woken (see `super::run`).
+//! The only change from the WCH assembly is a counter increment in each handler
+//! (for `STATS`). Don't call Rust from the ecall handler: a critical section there
+//! (MIE = 0) clears MPIE without restoring it, so the `mret` would leave
+//! interrupts disabled.
+//!
+//! `RTC_ALARM`: with the interrupt-driven controller the link layer times
+//! connection events from the RTC alarm. It pends this interrupt itself when it
+//! needs to (re)compute the next event; `TMOS_TimerIRQHandler` returns the RTC
+//! count for the next alarm.
+//!
+//! BB/LLE/RTC_ALARM run at the same preemption level as the embassy SysTick interrupt so
+//! they never nest: the deferred return must not happen inside another handler.
+
+use core::sync::atomic::AtomicU32;
 
 use super::ffi;
 
@@ -28,6 +40,12 @@ core::arch::global_asm!(
     .global MachineEnvCall
     .align 2
 MachineEnvCall:
+    # Count deferred returns (a0/a1 are restored from the frame below)
+    la a1, LLE_DEFERRED
+    lw a0, 0(a1)
+    addi a0, a0, 1
+    sw a0, 0(a1)
+
     addi a1, x0, 0x20
     csrs 0x804, a1
 
@@ -104,7 +122,11 @@ LLE:
     sw x30, 28 * 4( sp )
     sw x31, 29 * 4( sp )
 
-    call ble_irq_wake
+    # Count LLE interrupts
+    la a1, LLE_IRQS
+    lw a0, 0(a1)
+    addi a0, a0, 1
+    sw a0, 0(a1)
 
     la a1, g_LLE_IRQLibHandlerLocation
     lw a0, 0(a1)
@@ -146,18 +168,33 @@ LLE:
     "#
 );
 
-/// Called from the `LLE` vector before the library handler
+/// LLE interrupts, incremented by the `LLE` handler
 #[unsafe(no_mangle)]
-extern "C" fn ble_irq_wake() {
-    super::count(&super::STATS.lle_irqs);
-    super::wake();
-}
+pub(super) static LLE_IRQS: AtomicU32 = AtomicU32::new(0);
+/// Deferred controller work completions, incremented by the ecall handler
+#[unsafe(no_mangle)]
+pub(super) static LLE_DEFERRED: AtomicU32 = AtomicU32::new(0);
 
 #[qingke_rt::interrupt]
 fn BB() {
     super::count(&super::STATS.bb_irqs);
     unsafe { ffi::BB_IRQLibHandler() };
-    super::wake();
+}
+
+#[qingke_rt::interrupt]
+fn RTC_ALARM() {
+    use ch32_hal::interrupt::{Interrupt, InterruptExt};
+
+    super::rtc::clear_alarm();
+    super::count(&super::STATS.rtc_irqs);
+    let mut time = 0u32;
+    if unsafe { ffi::TMOS_TimerIRQHandler(&mut time) } == 0 {
+        super::rtc::set_alarm(time);
+        // Already passed while being set: run again now
+        if time.wrapping_sub(super::rtc::now()) as i32 <= 0 {
+            Interrupt::RTC_ALARM.pend();
+        }
+    }
 }
 
 /// Point the `LLE` vector at the library handler (checked by `BLE_LibInit`)
@@ -165,12 +202,20 @@ pub(super) unsafe fn set_lle_handler() {
     unsafe { g_LLE_IRQLibHandlerLocation = ffi::LLE_IRQLibHandler as *const () as u32 };
 }
 
-/// Enable the BB/LLE interrupts
+/// Enable the BB/LLE/RTC_ALARM interrupts.
+///
+/// With 2 nesting levels bit 7 of the priority is the preemption bit, so P8 is
+/// the same preemption level as SysTick (P15, set by the ch32-hal time driver)
+/// but wins when both are pending.
 pub(super) unsafe fn enable() {
-    use ch32_hal::interrupt::{Interrupt, InterruptExt};
+    use ch32_hal::interrupt::{Interrupt, InterruptExt, Priority};
 
     unsafe {
+        Interrupt::BB.set_priority(Priority::P8);
+        Interrupt::LLE.set_priority(Priority::P8);
+        Interrupt::RTC_ALARM.set_priority(Priority::P8);
         Interrupt::BB.enable();
         Interrupt::LLE.enable();
+        Interrupt::RTC_ALARM.enable();
     }
 }

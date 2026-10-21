@@ -1,0 +1,12 @@
+#!/bin/sh
+
+WLINK_HOST="${WLINK_HOST:-192.168.64.1}"
+ENABLE_SDI=${ENABLE_SDI:-1}
+
+: ${1?Usage: $0 <file>}
+
+if [ ${ENABLE_SDI} -eq 1 ]; then
+    ssh ${WLINK_HOST} 'F=$(mktemp); trap "rm -rf $F" EXIT; cat > $F; echo $F; pkill wlink; wlink flash --enable-sdi-print --watch-serial --erase $F' < $1
+else
+    ssh ${WLINK_HOST} 'F=$(mktemp); trap "rm -rf $F" EXIT; cat > $F; echo $F; pkill wlink; wlink flash --erase $F' < $1
+fi

@@ -1,7 +1,8 @@
 //! Simple BLE advertiser (port of the CH32V20x EVT `BLE/Broadcaster` example).
 //!
-//! Advertises non-connectable as "ch32v208" with scan response "Broadcaster",
-//! every 100ms. TMOS runs in the `ble` embassy task alongside a `tick` task.
+//! Advertises scannable (not connectable) as "ch32v208" with scan response
+//! "Broadcaster", every 100ms. The EVT uses non-connectable advertising; scannable
+//! also exercises the scan request/response path. TMOS runs in the `ble` embassy task alongside a `tick` task.
 
 #![no_std]
 #![no_main]
@@ -11,6 +12,7 @@ use ch32_hal::rcc::*;
 use ch32_hal::time::Hertz;
 use ch32v208_ble::ble;
 use ch32v208_ble::ble::ffi::*;
+use ch32v208_ble::ble::gap::*;
 
 use embassy_executor::Spawner;
 use embassy_time::Timer;
@@ -81,11 +83,23 @@ fn broadcaster_init() -> bStatus_t {
         GAPRole_BroadcasterInit()?;
 
         let advertising_enable: u8 = 1;
-        let adv_event_type: u8 = GAP_ADTYPE_ADV_NONCONN_IND;
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, 1, &raw const advertising_enable as _)?;
+        let adv_event_type: u8 = GAP_ADTYPE_ADV_SCAN_IND;
+        GAPRole_SetParameter(
+            GAPROLE_ADVERT_ENABLED,
+            1,
+            &raw const advertising_enable as _,
+        )?;
         GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, 1, &raw const adv_event_type as _)?;
-        GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, SCAN_RSP_DATA.len() as u16, SCAN_RSP_DATA.as_ptr() as _)?;
-        GAPRole_SetParameter(GAPROLE_ADVERT_DATA, ADVERT_DATA.len() as u16, ADVERT_DATA.as_ptr() as _)?;
+        GAPRole_SetParameter(
+            GAPROLE_SCAN_RSP_DATA,
+            SCAN_RSP_DATA.len() as u16,
+            SCAN_RSP_DATA.as_ptr() as _,
+        )?;
+        GAPRole_SetParameter(
+            GAPROLE_ADVERT_DATA,
+            ADVERT_DATA.len() as u16,
+            ADVERT_DATA.as_ptr() as _,
+        )?;
 
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADVERTISING_INTERVAL)?;
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADVERTISING_INTERVAL)?;
@@ -161,26 +175,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
-/// Report CPU exceptions instead of qingke-rt's silent loop
-#[unsafe(no_mangle)]
-extern "C" fn ExceptionHandler() -> ! {
-    let (mcause, mepc, mtval): (usize, usize, usize);
-    unsafe {
-        core::arch::asm!("csrr {}, mcause", "csrr {}, mepc", "csrr {}, mtval",
-            out(reg) mcause, out(reg) mepc, out(reg) mtval);
-    }
-    println!("\n!! exception mcause={:#x} mepc={:#x} mtval={:#x}", mcause, mepc, mtval);
-    loop {}
-}
-
-/// Report unexpected interrupts instead of qingke-rt's silent loop
-#[unsafe(no_mangle)]
-extern "C" fn DefaultHandler() -> ! {
-    let mcause: usize;
-    unsafe { core::arch::asm!("csrr {}, mcause", out(reg) mcause) };
-    println!("\n!! unhandled interrupt mcause={:#x}", mcause);
-    loop {}
-}
+ch32v208_ble::fault_handlers!();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {

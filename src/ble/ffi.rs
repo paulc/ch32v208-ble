@@ -1,4 +1,5 @@
-//! Bindings to `vendor/libwchble.a` (CH32V20x_BLE_LIB_V1.4).
+//! Bindings to `vendor/libwchble.a` (CH32V20x_BLE_LIB_V1.4): library init and TMOS.
+//! GAP and GATT bindings are in `super::gap` and `super::gatt`.
 //!
 //! Hand-written from `vendor/wchble.h`, covering only what is used so far. Names
 //! and values follow the C header so the WCH reference manual and EVT examples can
@@ -8,12 +9,19 @@
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code)]
 
-use core::ffi::c_void;
 use core::num::NonZeroU8;
 
 /// `bStatus_t` is a `uint8_t` where 0 is SUCCESS. `Result<(), NonZeroU8>` has the
 /// same ABI, so library calls can be used with `?`.
 pub type bStatus_t = Result<(), NonZeroU8>;
+
+/* Status codes (raw `uint8_t` values, e.g. for GATT callback returns) */
+pub const SUCCESS: u8 = 0x00;
+pub const FAILURE: u8 = 0x01;
+pub const INVALIDPARAMETER: u8 = 0x02;
+pub const bleIncorrectMode: u8 = 0x12;
+pub const bleMemAllocError: u8 = 0x13;
+pub const blePending: u8 = 0x16;
 
 pub type tmosTaskID = u8;
 pub type tmosEvents = u16;
@@ -116,7 +124,8 @@ pub struct bleClockConfig_t {
     pub ClockFrequency: u16,
     /// The timing clock accuracy (ppm)
     pub ClockAccuracy: u16,
-    /// reserved
+    /// Header: "resv". Selects how the link layer runs: 0 = polled from
+    /// `TMOS_SystemProcess`, 1 = deferred from the LLE interrupt (`TMOS_SysRegister`).
     pub irqEnable: u8,
 }
 
@@ -142,61 +151,12 @@ pub struct tmos_event_hdr_t {
     pub status: u8,
 }
 
+/// Message event: incoming GATT message (`super::gatt::gattMsgEvent_t`)
+pub const GATT_MSG_EVENT: u8 = 0xB0;
+/// Message event: incoming GAP message (`super::gap::gapRoleEvent_t`)
+pub const GAP_MSG_EVENT: u8 = 0xD0;
+
 pub type pTaskEventHandlerFn = Option<unsafe extern "C" fn(taskID: tmosTaskID, events: tmosEvents) -> tmosEvents>;
-
-/* GAP */
-
-/// Minimum advertising interval (n * 0.625 mSec)
-pub const TGAP_DISC_ADV_INT_MIN: u16 = 3;
-/// Maximum advertising interval (n * 0.625 mSec)
-pub const TGAP_DISC_ADV_INT_MAX: u16 = 4;
-
-/* GAP_ADVERTISEMENT_TYPE_DEFINES */
-pub const GAP_ADTYPE_ADV_IND: u8 = 0x00;
-pub const GAP_ADTYPE_ADV_SCAN_IND: u8 = 0x02;
-pub const GAP_ADTYPE_ADV_NONCONN_IND: u8 = 0x03;
-
-/* GAP_ADTYPE_DEFINES */
-pub const GAP_ADTYPE_FLAGS: u8 = 0x01;
-pub const GAP_ADTYPE_LOCAL_NAME_SHORT: u8 = 0x08;
-pub const GAP_ADTYPE_LOCAL_NAME_COMPLETE: u8 = 0x09;
-pub const GAP_ADTYPE_POWER_LEVEL: u8 = 0x0A;
-pub const GAP_ADTYPE_MANUFACTURER_SPECIFIC: u8 = 0xFF;
-
-/* GAP_ADTYPE_FLAGS_MODES */
-pub const GAP_ADTYPE_FLAGS_GENERAL: u8 = 0x02;
-pub const GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED: u8 = 0x04;
-
-/* GAPROLE_PROFILE_PARAMETERS */
-pub const GAPROLE_PROFILEROLE: u16 = 0x300;
-pub const GAPROLE_ADVERT_ENABLED: u16 = 0x305;
-pub const GAPROLE_ADVERT_DATA: u16 = 0x306;
-pub const GAPROLE_SCAN_RSP_DATA: u16 = 0x307;
-pub const GAPROLE_ADV_EVENT_TYPE: u16 = 0x308;
-
-/// GAP role state. Bits [3:0] are the advertising state.
-pub type gapRole_States_t = u32;
-
-pub const GAPROLE_STATE_ADV_MASK: gapRole_States_t = 0xF;
-pub const GAPROLE_INIT: gapRole_States_t = 0;
-pub const GAPROLE_STARTED: gapRole_States_t = 1;
-pub const GAPROLE_ADVERTISING: gapRole_States_t = 2;
-pub const GAPROLE_WAITING: gapRole_States_t = 3;
-pub const GAPROLE_CONNECTED: gapRole_States_t = 4;
-pub const GAPROLE_CONNECTED_ADV: gapRole_States_t = 5;
-pub const GAPROLE_ERROR: gapRole_States_t = 6;
-
-pub type gapRolesBroadcasterStateNotify_t = Option<unsafe extern "C" fn(newState: gapRole_States_t)>;
-/// Scan request received (argument is a `gapScanRec_t *`, not bound yet)
-pub type gapRolesScanReqRecv_t = Option<unsafe extern "C" fn(pEvent: *mut c_void)>;
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct gapRolesBroadcasterCBs_t {
-    /// Whenever the device changes state
-    pub pfnStateChange: gapRolesBroadcasterStateNotify_t,
-    pub pfnScanRecv: gapRolesScanReqRecv_t,
-}
 
 #[link(name = "wchble", kind = "static")]
 unsafe extern "C" {
@@ -220,6 +180,12 @@ unsafe extern "C" {
     pub fn TMOS_TimerInit(pClockConfig: *const bleClockConfig_t) -> bStatus_t;
     /// Register a process event callback. Returns 0xFF on error, otherwise the task id.
     pub fn TMOS_ProcessEventRegister(eventCb: pTaskEventHandlerFn) -> tmosTaskID;
+    /// Timer interrupt handler for the interrupt-driven controller (`irqEnable`).
+    /// Call from the `RTC_ALARM` interrupt. Returns 0 with `*time` set to the RTC
+    /// count at which to call it again (alarm), or non-zero if no alarm is needed
+    /// (1 = TMOS not ready, 2 = irqEnable not set, 3 = event started now,
+    /// 0xFF = no handler, i.e. no connection).
+    pub fn TMOS_TimerIRQHandler(time: *mut u32) -> u8;
     /// Process system (one pass)
     pub fn TMOS_SystemProcess();
     /// Get current system clock (in 625us units)
@@ -235,20 +201,4 @@ unsafe extern "C" {
     pub fn tmos_msg_receive(taskID: tmosTaskID) -> *mut u8;
     /// Free a received message
     pub fn tmos_msg_deallocate(msg_ptr: *mut u8) -> bStatus_t;
-
-    /* GAP */
-
-    /// Set a GAP parameter (TGAP_*)
-    pub fn GAP_SetParamValue(paramID: u16, paramValue: u16) -> bStatus_t;
-    /// Set a GAP Role parameter (GAPROLE_*). The value is copied.
-    pub fn GAPRole_SetParameter(param: u16, len: u16, pValue: *const c_void) -> bStatus_t;
-
-    /* GAP Broadcaster role */
-
-    /// Initialize the Broadcaster role
-    pub fn GAPRole_BroadcasterInit() -> bStatus_t;
-    /// Start the device in Broadcaster role
-    pub fn GAPRole_BroadcasterStartDevice(pAppCallbacks: &'static gapRolesBroadcasterCBs_t) -> bStatus_t;
-    /// Set the Broadcaster scan request callback
-    pub fn GAPRole_BroadcasterSetCB(pAppCallbacks: &'static gapRolesBroadcasterCBs_t);
 }

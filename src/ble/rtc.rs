@@ -28,10 +28,13 @@ pub enum Error {
     WriteTimeout,
 }
 
-/// Start the LSE and run the RTC counter from it
+/// Start the LSE and run the RTC counter from it.
+///
+/// The RTC lives in the backup domain, which keeps its state across resets. If
+/// it does not respond (e.g. left mid-configuration), the backup domain is reset
+/// and the start-up retried once.
 pub fn init() -> Result<(), Error> {
     let rcc = pac::RCC;
-    let rtc = pac::RTC;
 
     // Enable access to the backup domain
     rcc.apb1pcenr().modify(|w| {
@@ -43,9 +46,26 @@ pub fn init() -> Result<(), Error> {
     // The RTC clock source can only be changed by resetting the backup domain
     let rtcsel = rcc.bdctlr().read().rtcsel();
     if rtcsel != Rtcsel::LSE && rtcsel != Rtcsel::NO_CLK {
-        rcc.bdctlr().modify(|w| w.set_bdrst(true));
-        rcc.bdctlr().modify(|w| w.set_bdrst(false));
+        reset_backup_domain();
     }
+
+    match start() {
+        Err(Error::SyncTimeout | Error::WriteTimeout) => {
+            reset_backup_domain();
+            start()
+        }
+        result => result,
+    }
+}
+
+fn reset_backup_domain() {
+    pac::RCC.bdctlr().modify(|w| w.set_bdrst(true));
+    pac::RCC.bdctlr().modify(|w| w.set_bdrst(false));
+}
+
+fn start() -> Result<(), Error> {
+    let rcc = pac::RCC;
+    let rtc = pac::RTC;
 
     rcc.bdctlr().modify(|w| w.set_lseon(true));
     wait_for(|| rcc.bdctlr().read().lserdy(), Error::LseNotReady)?;
@@ -84,6 +104,37 @@ fn wait_for(ready: impl Fn() -> bool, error: Error) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// EXTI line connected to the RTC alarm
+const EXTI_LINE_RTC_ALARM: usize = 17;
+
+/// Route the RTC alarm to the `RTC_ALARM` interrupt (via EXTI line 17, rising edge)
+pub fn enable_alarm_interrupt() {
+    let exti = pac::EXTI;
+    exti.rtenr().modify(|w| w.set_tr(EXTI_LINE_RTC_ALARM, true));
+    exti.intenr().modify(|w| w.set_mr(EXTI_LINE_RTC_ALARM, true));
+    pac::RTC.ctlrh().modify(|w| w.set_alrie(true));
+}
+
+/// Set the alarm to fire when the counter reaches `time`.
+///
+/// Called from the alarm interrupt: waits (a few RTC clocks) for the RTC
+/// write to complete rather than timing out.
+pub fn set_alarm(time: u32) {
+    let rtc = pac::RTC;
+    while !rtc.ctlrl().read().rtoff() {}
+    rtc.ctlrl().modify(|w| w.set_cnf(true));
+    rtc.alrmh().write(|w| w.set_alrh((time >> 16) as u16));
+    rtc.alrml().write(|w| w.set_alrl(time as u16));
+    rtc.ctlrl().modify(|w| w.set_cnf(false));
+    while !rtc.ctlrl().read().rtoff() {}
+}
+
+/// Clear the alarm flag and its EXTI pending bit
+pub fn clear_alarm() {
+    pac::RTC.ctlrl().modify(|w| w.set_alrf(false));
+    pac::EXTI.intfr().write(|w| w.set_if_(EXTI_LINE_RTC_ALARM, true));
 }
 
 /// Current RTC count

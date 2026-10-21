@@ -2,36 +2,46 @@
 //!
 //! The library contains the BLE controller and host, scheduled by WCH's TMOS
 //! (a cooperative event/task scheduler). The application drives it by calling
-//! `TMOS_SystemProcess()` repeatedly. Here that is done by [`run`], which should be
-//! spawned as an embassy task:
+//! `TMOS_SystemProcess()` repeatedly. Here that is done by [`run`], spawned as an
+//! embassy task: it calls TMOS and yields, in a loop, so other tasks run between
+//! passes. (The EVT without sleep does the same from `main`.)
 //!
-//! - After each pass TMOS calls our idle callback with the RTC count of its next
-//!   timed event; [`run`] then sleeps (async) until that time, or until a BB/LLE
-//!   interrupt signals that the radio has produced work.
-//! - If TMOS was not idle, [`run`] just yields and calls it again.
+//! The library's idle callback (`idleCB`) is not used: around it the library
+//! powers down part of the RF (RFEND), with interrupts enabled, which races with
+//! the interrupt-driven controller below (connectable advertising stalled).
+//! The executor spins anyway; low power needs a proper sleep integration later.
 //!
-//! The library is not re-entrant: call TMOS/GAP functions either before spawning
-//! [`run`], or from TMOS callbacks/tasks. If another embassy task calls into the
-//! library it should call [`wake`] afterwards so TMOS processes any new events.
+//! The controller (link layer) runs interrupt-driven: `bleClockConfig_t::irqEnable`
+//! is set (the header marks it reserved, and the WCH EVT leaves it 0). With 0 the
+//! link layer is polled from `TMOS_SystemProcess`, so replies such as scan
+//! responses and connection-event data depend on TMOS being called back-to-back,
+//! as the EVT main loop does. With 1 the LLE interrupt defers the link-layer work
+//! to thread level straight away (the ecall mechanism in `irq`), independent of
+//! how often [`run`] gets to call TMOS. In this mode connection events are
+//! timed from the RTC alarm interrupt (see `irq`).
+//!
+//! The library is not re-entrant: call it from thread level only, i.e. from
+//! embassy tasks or TMOS callbacks. All tasks share one cooperative executor,
+//! so calls never overlap (the controller's interrupt-deferred work is designed
+//! to preempt thread-level library code).
 //!
 //! Setup mirrors `HAL/MCU.c` (`WCHBLE_Init`, `HAL_Init`) and `HAL/RTC.c` from the
 //! CH32V20x EVT (openwch/ch32v20x `EVT/EXAM/BLE`).
 
 pub mod ffi;
+pub mod gap;
+pub mod gatt;
 mod irq;
 pub mod rtc;
 
 use core::ffi::CStr;
 use core::mem::MaybeUninit;
 use core::num::NonZeroU8;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use ch32_hal::pac;
-use embassy_futures::select::select;
 use embassy_futures::yield_now;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
-use embassy_time::{Instant, Timer};
+use embassy_time::Instant;
 
 use self::ffi::*;
 
@@ -46,8 +56,6 @@ static mut BLE_HEAP: BleHeap = BleHeap([MaybeUninit::uninit(); HEAP_SIZE]);
 const BLE_BUFF_MAX_LEN: u16 = 27;
 const BLE_BUFF_NUM: u8 = 5;
 const BLE_TX_NUM_EVENT: u8 = 1;
-const PERIPHERAL_MAX_CONNECTION: u8 = 1;
-const CENTRAL_MAX_CONNECTION: u8 = 3;
 
 /// HAL task event: periodic RF calibration
 const HAL_REG_INIT_EVENT: tmosEvents = 0x2000;
@@ -56,28 +64,22 @@ const BLE_CALIBRATION_PERIOD_MS: u32 = 120_000;
 /// OSC registers (not in the ch32-metapac CH32V208 PAC)
 const OSC_HSE_CAL_CTRL: *mut u32 = 0x4002_202C as *mut u32;
 
-/// Signalled by the BB/LLE interrupts (and [`wake`]) to run TMOS
-static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-/// Set by the idle callback during `TMOS_SystemProcess`
-static IDLE: AtomicBool = AtomicBool::new(false);
-/// RTC count of the next TMOS timed event, valid when IDLE is set
-static IDLE_UNTIL: AtomicU32 = AtomicU32::new(0);
 
 /// Event counters, for diagnostics
 pub struct Stats {
     /// `TMOS_SystemProcess` calls
     pub tmos_passes: AtomicU32,
-    /// Idle callbacks
-    pub idle: AtomicU32,
     pub bb_irqs: AtomicU32,
-    pub lle_irqs: AtomicU32,
+    /// RTC alarm interrupts (connection event timing)
+    pub rtc_irqs: AtomicU32,
+    // LLE interrupts and deferred (ecall) returns are counted in assembly:
+    // see `irq::LLE_IRQS` and `irq::LLE_DEFERRED`
 }
 
 pub static STATS: Stats = Stats {
     tmos_passes: AtomicU32::new(0),
-    idle: AtomicU32::new(0),
     bb_irqs: AtomicU32::new(0),
-    lle_irqs: AtomicU32::new(0),
+    rtc_irqs: AtomicU32::new(0),
 };
 
 /// Increment a counter. No atomic RMW on riscv32imc, but each counter has a single writer.
@@ -89,11 +91,12 @@ impl core::fmt::Display for Stats {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "tmos={} idle={} bb={} lle={} rtc={}",
+            "tmos={} bb={} lle={} deferred={} alarm={} rtc={}",
             self.tmos_passes.load(Ordering::Relaxed),
-            self.idle.load(Ordering::Relaxed),
             self.bb_irqs.load(Ordering::Relaxed),
-            self.lle_irqs.load(Ordering::Relaxed),
+            irq::LLE_IRQS.load(Ordering::Relaxed),
+            irq::LLE_DEFERRED.load(Ordering::Relaxed),
+            self.rtc_irqs.load(Ordering::Relaxed),
             rtc::now()
         )
     }
@@ -117,6 +120,11 @@ pub struct Config {
     pub mac_addr: MacAddress,
     /// `ffi::LL_TX_POWEER_*`
     pub tx_power: u8,
+    /// Maximum connections as peripheral (0-3)
+    pub peripheral_connections: u8,
+    /// Maximum connections as central. With the interrupt-driven controller the
+    /// library allows at most 2 connections in total.
+    pub central_connections: u8,
 }
 
 impl Default for Config {
@@ -124,6 +132,8 @@ impl Default for Config {
         Config {
             mac_addr: MacAddress::factory(),
             tx_power: LL_TX_POWEER_0_DBM,
+            peripheral_connections: 1,
+            central_connections: 1,
         }
     }
 }
@@ -134,6 +144,8 @@ impl Default for Config {
 /// used for the LSE start-up timeout). Call the GAP role init functions after
 /// this, then spawn [`run`].
 pub fn init(config: Config) -> Result<(), Error> {
+    zero_common_symbols();
+
     if !lib_version().starts_with(VER_FILE) {
         return Err(Error::LibVersion);
     }
@@ -151,6 +163,7 @@ pub fn init(config: Config) -> Result<(), Error> {
     }
 
     rtc::init().map_err(Error::Rtc)?;
+    rtc::enable_alarm_interrupt();
 
     let mut cfg: bleConfig_t = unsafe { core::mem::zeroed() };
     cfg.MEMAddr = &raw mut BLE_HEAP as u32;
@@ -162,10 +175,10 @@ pub fn init(config: Config) -> Result<(), Error> {
     // No SNV (SNVAddr, SNVNum, readFlashCB, writeFlashCB): bonding info is not saved
     cfg.ClockFrequency = rtc::RTC_FREQ_HZ as u16;
     cfg.ClockAccuracy = 50; // LSE
-    cfg.ConnectNumber = (PERIPHERAL_MAX_CONNECTION & 3) | (CENTRAL_MAX_CONNECTION << 2);
+    cfg.ConnectNumber = (config.peripheral_connections & 3) | (config.central_connections << 2);
     cfg.MacAddr = config.mac_addr.0;
     cfg.srandCB = Some(srand);
-    cfg.idleCB = Some(idle);
+    // No idleCB: see the module docs
     // No temperature sampling (tsCB) or LSI calibration (rcCB) - using LSE
 
     unsafe {
@@ -184,8 +197,10 @@ pub fn init(config: Config) -> Result<(), Error> {
             ClockMaxCount: u32::MAX,
             ClockFrequency: rtc::RTC_FREQ_HZ as u16,
             ClockAccuracy: 100, // LSE
-            irqEnable: 0,
+            // Interrupt-driven controller: see the module docs
+            irqEnable: 1,
         };
+        // Fails if irqEnable is set and there are more than 2 connections in total
         TMOS_TimerInit(&clock).map_err(Error::TimerInit)?;
 
         tmos_start_task(
@@ -198,45 +213,33 @@ pub fn init(config: Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// Run TMOS forever. Spawn this in an embassy task after [`init`].
-pub async fn run() -> ! {
-    loop {
-        WAKE.reset();
-        IDLE.store(false, Ordering::Relaxed);
-
-        unsafe { TMOS_SystemProcess() };
-        count(&STATS.tmos_passes);
-
-        if IDLE.load(Ordering::Relaxed) {
-            let ticks = IDLE_UNTIL.load(Ordering::Relaxed).wrapping_sub(rtc::now()) as i32;
-            if ticks > 0 {
-                let timeout = Timer::after_micros(rtc::ticks_to_us(ticks as u32));
-                select(WAKE.wait(), timeout).await;
-                continue;
-            }
-        }
-        yield_now().await;
+/// Zero the library's C common symbols (see build.rs): they are outside the
+/// range zeroed at reset, so would otherwise keep values from before a reset.
+fn zero_common_symbols() {
+    unsafe extern "C" {
+        static mut __ble_common_start: u8;
+        static mut __ble_common_end: u8;
+    }
+    unsafe {
+        let start = &raw mut __ble_common_start;
+        let len = (&raw mut __ble_common_end as usize) - (start as usize);
+        core::ptr::write_bytes(start, 0, len);
     }
 }
 
-/// Wake [`run`] so TMOS processes newly set events
-pub fn wake() {
-    WAKE.signal(());
+/// Run TMOS forever, yielding to other tasks between passes. Spawn this in an
+/// embassy task after [`init`].
+pub async fn run() -> ! {
+    loop {
+        unsafe { TMOS_SystemProcess() };
+        count(&STATS.tmos_passes);
+        yield_now().await;
+    }
 }
 
 /// Library version, e.g. "CH32V20x_BLE_LIB_V1.4"
 pub fn lib_version() -> &'static str {
     unsafe { CStr::from_ptr(VER_LIB.as_ptr().cast()) }.to_str().unwrap_or("?")
-}
-
-/// `idleCB`: TMOS has nothing to do until RTC count `time`.
-///
-/// Returns non-zero ("did not sleep"); the waiting is done in [`run`].
-unsafe extern "C" fn idle(time: u32) -> u32 {
-    IDLE_UNTIL.store(time, Ordering::Relaxed);
-    IDLE.store(true, Ordering::Relaxed);
-    count(&STATS.idle);
-    1
 }
 
 /// `srandCB`: random seed
@@ -274,6 +277,31 @@ impl MacAddress {
         let lo = unsafe { (0x1FFF_F7E8 as *const u32).read_volatile() }.to_le_bytes();
         let hi = unsafe { (0x1FFF_F7EC as *const u32).read_volatile() }.to_le_bytes();
         MacAddress([lo[0], lo[1], lo[2], lo[3], hi[0], hi[1]])
+    }
+
+    /// Pseudo-random address, for testing (e.g. to avoid a scanner's cached name).
+    ///
+    /// Mixes the factory MAC with the RTC counter (which keeps running across
+    /// resets until [`init`] restarts it) and SysTick. Not cryptographic. The top
+    /// two bits are set as for a static random address, but the library still
+    /// uses it as its (public) device address.
+    pub fn random() -> Self {
+        let factory = Self::factory().0;
+        let mut seed = u32::from_le_bytes([factory[0], factory[1], factory[2], factory[3]])
+            ^ (u32::from(factory[4]) << 8 | u32::from(factory[5]))
+            ^ rtc::now()
+            ^ (pac::SYSTICK.cnt().read() as u32);
+        let mut next = || {
+            // splitmix32
+            seed = seed.wrapping_add(0x9E37_79B9);
+            let mut z = seed;
+            z = (z ^ (z >> 16)).wrapping_mul(0x85EB_CA6B);
+            z = (z ^ (z >> 13)).wrapping_mul(0xC2B2_AE35);
+            z ^ (z >> 16)
+        };
+        let low = next().to_le_bytes();
+        let high = next().to_le_bytes();
+        MacAddress([low[0], low[1], low[2], low[3], high[0], high[1] | 0xC0])
     }
 
     /// Convert from human readable format, MSB first
