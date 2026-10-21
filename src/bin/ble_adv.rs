@@ -1,0 +1,189 @@
+//! Simple BLE advertiser (port of the CH32V20x EVT `BLE/Broadcaster` example).
+//!
+//! Advertises non-connectable as "ch32v208" with scan response "Broadcaster",
+//! every 100ms. TMOS runs in the `ble` embassy task alongside a `tick` task.
+
+#![no_std]
+#![no_main]
+
+use ch32_hal::println;
+use ch32_hal::rcc::*;
+use ch32_hal::time::Hertz;
+use ch32v208_ble::ble;
+use ch32v208_ble::ble::ffi::*;
+
+use embassy_executor::Spawner;
+use embassy_time::Timer;
+
+// GAP - Advertisement data (max size = 31 bytes)
+static ADVERT_DATA: [u8; 18] = [
+    0x02, // length of this data
+    GAP_ADTYPE_FLAGS,
+    GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
+    0x04, // length of this data
+    GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+    0xD7,
+    0x07, // 0x07D7, Nanjing Qinheng Microelectronics Co., Ltd.
+    0x01,
+    0x09, // length of this data
+    GAP_ADTYPE_LOCAL_NAME_SHORT,
+    b'c',
+    b'h',
+    b'3',
+    b'2',
+    b'v',
+    b'2',
+    b'0',
+    b'8',
+];
+
+// GAP - Scan response data (max size = 31 bytes)
+static SCAN_RSP_DATA: [u8; 16] = [
+    0x0c, // length of this data
+    GAP_ADTYPE_LOCAL_NAME_COMPLETE,
+    b'B',
+    b'r',
+    b'o',
+    b'a',
+    b'd',
+    b'c',
+    b'a',
+    b's',
+    b't',
+    b'e',
+    b'r',
+    0x02, // length of this data
+    GAP_ADTYPE_POWER_LEVEL,
+    0, // 0dBm
+];
+
+/// Advertising interval in 0.625ms units (100ms)
+const ADVERTISING_INTERVAL: u16 = 160;
+
+static BROADCASTER_CBS: gapRolesBroadcasterCBs_t = gapRolesBroadcasterCBs_t {
+    pfnStateChange: Some(broadcaster_state),
+    pfnScanRecv: None,
+};
+
+unsafe extern "C" fn broadcaster_state(new_state: gapRole_States_t) {
+    match new_state & GAPROLE_STATE_ADV_MASK {
+        GAPROLE_STARTED => println!("Initialized.."),
+        GAPROLE_ADVERTISING => println!("Advertising.."),
+        GAPROLE_WAITING => println!("Waiting for advertising.."),
+        GAPROLE_ERROR => println!("Error.."),
+        _ => println!("Broadcaster state: {:#x}", new_state),
+    }
+}
+
+/// Broadcaster_Init in the EVT
+fn broadcaster_init() -> bStatus_t {
+    unsafe {
+        GAPRole_BroadcasterInit()?;
+
+        let advertising_enable: u8 = 1;
+        let adv_event_type: u8 = GAP_ADTYPE_ADV_NONCONN_IND;
+        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, 1, &raw const advertising_enable as _)?;
+        GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, 1, &raw const adv_event_type as _)?;
+        GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, SCAN_RSP_DATA.len() as u16, SCAN_RSP_DATA.as_ptr() as _)?;
+        GAPRole_SetParameter(GAPROLE_ADVERT_DATA, ADVERT_DATA.len() as u16, ADVERT_DATA.as_ptr() as _)?;
+
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADVERTISING_INTERVAL)?;
+        GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADVERTISING_INTERVAL)?;
+
+        GAPRole_BroadcasterStartDevice(&BROADCASTER_CBS)
+    }
+}
+
+#[embassy_executor::task]
+async fn ble_task() -> ! {
+    ble::run().await
+}
+
+#[embassy_executor::task]
+async fn tick_task() -> ! {
+    let mut tick = 0u32;
+    loop {
+        Timer::after_millis(5000).await;
+        tick += 1;
+        println!("tick: {} {}", tick, ble::STATS);
+    }
+}
+
+#[embassy_executor::main(entry = "ch32_hal::entry")]
+async fn main(spawner: Spawner) -> ! {
+    ch32_hal::debug::SDIPrint::enable();
+
+    let mut config = ch32_hal::Config::default();
+    config.rcc = Config {
+        // 32MHz crystal (required by the radio). As in the WCH BLE EVT:
+        // SYSCLK = HSE/4 * 12 = 96MHz, PCLK1 = HCLK/2
+        hse: Some(Hse {
+            freq: Hertz(32_000_000),
+            mode: HseMode::Oscillator,
+        }),
+        sys: Sysclk::PLL,
+        pll_src: PllSource::HSE,
+        pll: Some(Pll {
+            prediv: PllPreDiv::DIV4,
+            mul: PllMul::MUL12,
+        }),
+        pllx: None,
+        ahb_pre: AHBPrescaler::DIV1,
+        apb1_pre: APBPrescaler::DIV2,
+        apb2_pre: APBPrescaler::DIV1,
+        ls: LsConfig::default_lsi(), // unused by ch32-hal; ble::init starts the LSE
+        hspll_src: HsPllSource::HSI,
+        hspll: None,
+    };
+    let _p = ch32_hal::init(config);
+
+    println!("BLE advertiser on ch32v208");
+    println!("Clocks: {:?}", ch32_hal::rcc::clocks());
+    println!("BLE lib: {}", ble::lib_version());
+
+    let ble_config = ble::Config::default();
+    println!("MAC: {}", ble_config.mac_addr);
+
+    if let Err(e) = ble::init(ble_config) {
+        panic!("ble::init: {:?}", e);
+    }
+    println!("ble::init done");
+    if let Err(e) = broadcaster_init() {
+        panic!("broadcaster_init: {:?}", e);
+    }
+    println!("broadcaster_init done");
+
+    spawner.spawn(ble_task().unwrap());
+    spawner.spawn(tick_task().unwrap());
+
+    loop {
+        Timer::after_secs(3600).await;
+    }
+}
+
+/// Report CPU exceptions instead of qingke-rt's silent loop
+#[unsafe(no_mangle)]
+extern "C" fn ExceptionHandler() -> ! {
+    let (mcause, mepc, mtval): (usize, usize, usize);
+    unsafe {
+        core::arch::asm!("csrr {}, mcause", "csrr {}, mepc", "csrr {}, mtval",
+            out(reg) mcause, out(reg) mepc, out(reg) mtval);
+    }
+    println!("\n!! exception mcause={:#x} mepc={:#x} mtval={:#x}", mcause, mepc, mtval);
+    loop {}
+}
+
+/// Report unexpected interrupts instead of qingke-rt's silent loop
+#[unsafe(no_mangle)]
+extern "C" fn DefaultHandler() -> ! {
+    let mcause: usize;
+    unsafe { core::arch::asm!("csrr {}, mcause", out(reg) mcause) };
+    println!("\n!! unhandled interrupt mcause={:#x}", mcause);
+    loop {}
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let _ = ch32_hal::println!("\n\n\n{}", info);
+    loop {}
+}
