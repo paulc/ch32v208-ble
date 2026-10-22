@@ -15,7 +15,7 @@ async fn main(_spawner: Spawner) -> ! {
     let mut config = ch32_hal::Config::default();
     config.rcc = Config {
         hse: Some(Hse {
-            freq: Hertz(16_000_000),
+            freq: Hertz(32_000_000),
             mode: HseMode::Oscillator,
         }),
         sys: Sysclk::PLL,
