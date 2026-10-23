@@ -121,27 +121,29 @@ async fn stats_task() -> ! {
 async fn main(spawner: Spawner) -> ! {
     ch32_hal::debug::SDIPrint::enable();
 
-    let mut config = ch32_hal::Config::default();
-    config.rcc = Config {
-        // 32MHz crystal (required by the radio). As in the WCH BLE EVT:
-        // SYSCLK = HSE/4 * 12 = 96MHz, PCLK1 = HCLK/2
-        hse: Some(Hse {
-            freq: Hertz(32_000_000),
-            mode: HseMode::Oscillator,
-        }),
-        sys: Sysclk::PLL,
-        pll_src: PllSource::HSE,
-        pll: Some(Pll {
-            prediv: PllPreDiv::DIV4,
-            mul: PllMul::MUL12,
-        }),
-        pllx: None,
-        ahb_pre: AHBPrescaler::DIV1,
-        apb1_pre: APBPrescaler::DIV2,
-        apb2_pre: APBPrescaler::DIV1,
-        ls: LsConfig::default_lsi(), // unused by ch32-hal; ble::init starts the LSE
-        hspll_src: HsPllSource::HSI,
-        hspll: None,
+    let config = ch32_hal::Config {
+        rcc: Config {
+            // 32MHz crystal (required by the radio). As in the WCH BLE EVT:
+            // SYSCLK = HSE/4 * 12 = 96MHz, PCLK1 = HCLK/2
+            hse: Some(Hse {
+                freq: Hertz(32_000_000),
+                mode: HseMode::Oscillator,
+            }),
+            sys: Sysclk::PLL,
+            pll_src: PllSource::HSE,
+            pll: Some(Pll {
+                prediv: PllPreDiv::DIV4,
+                mul: PllMul::MUL12,
+            }),
+            pllx: None,
+            ahb_pre: AHBPrescaler::DIV1,
+            apb1_pre: APBPrescaler::DIV2,
+            apb2_pre: APBPrescaler::DIV1,
+            ls: LsConfig::default_lsi(), // unused by ch32-hal; ble::init starts the LSE
+            hspll_src: HsPllSource::HSI,
+            hspll: None,
+        },
+        ..Default::default()
     };
     let _p = ch32_hal::init(config);
 
@@ -149,8 +151,10 @@ async fn main(spawner: Spawner) -> ! {
     println!("BLE lib: {}", ble::lib_version());
 
     // Use random MAC address to avoid MacOS caching
-    let mut ble_config = ble::Config::default();
-    ble_config.mac_addr = MacAddress::random();
+    let ble_config = ble::Config {
+        mac_addr: MacAddress::random(),
+        ..Default::default()
+    };
 
     println!("MAC: {}", ble_config.mac_addr);
     if let Err(e) = ble::init(ble_config) {
@@ -198,6 +202,6 @@ ch32v208_ble::fault_handlers!();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    let _ = ch32_hal::println!("\n\n\n{}", info);
+    ch32_hal::println!("\n\n\n{}", info);
     loop {}
 }

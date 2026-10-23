@@ -178,11 +178,15 @@ unsafe extern "C" fn read_attr(
     unsafe {
         match attr_index(attr) {
             DATA_VALUE => {
-                let data = &*&raw const DATA;
+                let data = &raw const DATA;
+                let data = &*data;
                 read_value(&data[..DATA_LEN], value, len, max_len)
             }
             DATA_USER_DESC => read_value(&DATA_DESC[..DATA_DESC.len() - 1], value, len, max_len),
-            COUNTER_VALUE => read_value(&*&raw const COUNTER, value, len, max_len),
+            COUNTER_VALUE => {
+                let counter = &raw const COUNTER;
+                read_value(&*counter, value, len, max_len)
+            }
             COUNTER_USER_DESC => read_value(&COUNTER_DESC[..COUNTER_DESC.len() - 1], value, len, max_len),
             COUNTER_CCC_ATTR => {
                 let cfg = GATTServApp_ReadCharCfg(conn_handle, &raw mut COUNTER_CCC as _);
@@ -211,7 +215,8 @@ unsafe extern "C" fn write_attr(
                 if new.len() > DATA_MAX_LEN {
                     return ATT_ERR_INVALID_VALUE_SIZE;
                 }
-                let data = &mut *&raw mut DATA;
+                let data = &raw mut DATA;
+                let data = &mut *data;
                 data[..new.len()].copy_from_slice(new);
                 DATA_LEN = new.len();
                 send_event(AppEvent::DataWritten(heapless::Vec::from_slice(new).unwrap()));
@@ -373,9 +378,11 @@ fn peripheral_init() -> bStatus_t {
 /// Send the counter as a notification (peripheralChar4Notify in the EVT)
 fn notify_counter(conn_handle: u16) -> bStatus_t {
     unsafe {
-        let value = &*&raw const COUNTER;
+        let value = &raw const COUNTER;
+        let value = &*value;
+        let attrs = &raw const ATTRS;
         let mut noti = attHandleValueNoti_t {
-            handle: (*&raw const ATTRS)[COUNTER_VALUE].handle,
+            handle: (*attrs)[COUNTER_VALUE].handle,
             len: value.len() as u16,
             pValue: core::ptr::null_mut(),
         };
@@ -428,11 +435,11 @@ async fn app_task() -> ! {
             },
             Either::Second(()) => {
                 counter = counter.wrapping_add(1);
-                unsafe { *&raw mut COUNTER = counter.to_le_bytes() };
-                if let (Some(handle), true) = (conn, notify) {
-                    if let Err(e) = notify_counter(handle) {
-                        println!("notify failed: {:#x}", e.get());
-                    }
+                unsafe { (&raw mut COUNTER).write(counter.to_le_bytes()) };
+                if let (Some(handle), true) = (conn, notify)
+                    && let Err(e) = notify_counter(handle)
+                {
+                    println!("notify failed: {:#x}", e.get());
                 }
             }
         }
@@ -448,27 +455,29 @@ async fn ble_task() -> ! {
 async fn main(spawner: Spawner) -> ! {
     ch32_hal::debug::SDIPrint::enable();
 
-    let mut config = ch32_hal::Config::default();
-    config.rcc = Config {
-        // 32MHz crystal (required by the radio). As in the WCH BLE EVT:
-        // SYSCLK = HSE/4 * 12 = 96MHz, PCLK1 = HCLK/2
-        hse: Some(Hse {
-            freq: Hertz(32_000_000),
-            mode: HseMode::Oscillator,
-        }),
-        sys: Sysclk::PLL,
-        pll_src: PllSource::HSE,
-        pll: Some(Pll {
-            prediv: PllPreDiv::DIV4,
-            mul: PllMul::MUL12,
-        }),
-        pllx: None,
-        ahb_pre: AHBPrescaler::DIV1,
-        apb1_pre: APBPrescaler::DIV2,
-        apb2_pre: APBPrescaler::DIV1,
-        ls: LsConfig::default_lsi(), // unused by ch32-hal; ble::init starts the LSE
-        hspll_src: HsPllSource::HSI,
-        hspll: None,
+    let config = ch32_hal::Config {
+        rcc: Config {
+            // 32MHz crystal (required by the radio). As in the WCH BLE EVT:
+            // SYSCLK = HSE/4 * 12 = 96MHz, PCLK1 = HCLK/2
+            hse: Some(Hse {
+                freq: Hertz(32_000_000),
+                mode: HseMode::Oscillator,
+            }),
+            sys: Sysclk::PLL,
+            pll_src: PllSource::HSE,
+            pll: Some(Pll {
+                prediv: PllPreDiv::DIV4,
+                mul: PllMul::MUL12,
+            }),
+            pllx: None,
+            ahb_pre: AHBPrescaler::DIV1,
+            apb1_pre: APBPrescaler::DIV2,
+            apb2_pre: APBPrescaler::DIV1,
+            ls: LsConfig::default_lsi(), // unused by ch32-hal; ble::init starts the LSE
+            hspll_src: HsPllSource::HSI,
+            hspll: None,
+        },
+        ..Default::default()
     };
     let _p = ch32_hal::init(config);
 
@@ -499,6 +508,6 @@ ch32v208_ble::fault_handlers!();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    let _ = ch32_hal::println!("\n\n\n{}", info);
+    ch32_hal::println!("\n\n\n{}", info);
     loop {}
 }

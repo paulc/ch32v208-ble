@@ -151,11 +151,6 @@ pub fn now() -> u32 {
 }
 
 /// `getClockValue` callback for `TMOS_TimerInit`
-pub unsafe extern "C" fn get_clock_value() -> u32 {
+pub extern "C" fn get_clock_value() -> u32 {
     now()
-}
-
-/// Convert RTC ticks to microseconds
-pub fn ticks_to_us(ticks: u32) -> u64 {
-    ticks as u64 * 1_000_000 / RTC_FREQ_HZ as u64
 }

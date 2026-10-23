@@ -13,7 +13,6 @@ name = "ch32v208_ble"
 highcode = ["ch32-hal/highcode"]
 
 [dependencies]
-qingke = "0.8"
 qingke-rt = "0.8"
 
 ch32-hal = { 
@@ -36,11 +35,7 @@ embassy-time = "0.5.1"
 embassy-sync = "0.8.0"
 embassy-futures = "0.1.2"
 
-embedded-hal = "1.0.0"
-embedded-hal-async = "1.0.0"
-
-ufmt = { version = "0.2.0" }
-heapless = { version = "0.9.3", features = ["ufmt"] }
+heapless = "0.9.3"
 
 [profile.release]
 opt-level = "z"        # try "s" too — sometimes wins

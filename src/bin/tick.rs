@@ -12,25 +12,27 @@ use embassy_time::Timer;
 async fn main(_spawner: Spawner) -> ! {
     ch32_hal::debug::SDIPrint::enable();
 
-    let mut config = ch32_hal::Config::default();
-    config.rcc = Config {
-        hse: Some(Hse {
-            freq: Hertz(32_000_000),
-            mode: HseMode::Oscillator,
-        }),
-        sys: Sysclk::PLL,
-        pll_src: PllSource::HSE,
-        pll: Some(Pll {
-            prediv: PllPreDiv::DIV4,
-            mul: PllMul::MUL15,
-        }),
-        pllx: None,
-        ahb_pre: AHBPrescaler::DIV1,
-        apb1_pre: APBPrescaler::DIV1,
-        apb2_pre: APBPrescaler::DIV1,
-        ls: LsConfig::default_lsi(),
-        hspll_src: HsPllSource::HSI,
-        hspll: None,
+    let config = ch32_hal::Config {
+        rcc: Config {
+            hse: Some(Hse {
+                freq: Hertz(32_000_000),
+                mode: HseMode::Oscillator,
+            }),
+            sys: Sysclk::PLL,
+            pll_src: PllSource::HSE,
+            pll: Some(Pll {
+                prediv: PllPreDiv::DIV4,
+                mul: PllMul::MUL15,
+            }),
+            pllx: None,
+            ahb_pre: AHBPrescaler::DIV1,
+            apb1_pre: APBPrescaler::DIV1,
+            apb2_pre: APBPrescaler::DIV1,
+            ls: LsConfig::default_lsi(),
+            hspll_src: HsPllSource::HSI,
+            hspll: None,
+        },
+        ..Default::default()
     };
     let _p = ch32_hal::init(config);
 
@@ -48,6 +50,6 @@ async fn main(_spawner: Spawner) -> ! {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    let _ = ch32_hal::println!("\n\n\n{}", info);
+    ch32_hal::println!("\n\n\n{}", info);
     loop {}
 }
