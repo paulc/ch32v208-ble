@@ -22,6 +22,8 @@ pub const GAP_CONNHANDLE_INIT: u16 = 0xFFFE;
 pub const TGAP_DISC_ADV_INT_MIN: u16 = 3;
 /// Maximum advertising interval (n * 0.625 mSec)
 pub const TGAP_DISC_ADV_INT_MAX: u16 = 4;
+/// Scan request notifications (GAP_SCAN_REQUEST_EVENT). Default 0 (disabled).
+pub const TGAP_ADV_SCAN_REQ_NOTIFY: u16 = 30;
 
 /* GAP_ADVERTISEMENT_TYPE_DEFINES */
 pub const GAP_ADTYPE_ADV_IND: u8 = 0x00;
@@ -62,6 +64,8 @@ pub const GAP_END_DISCOVERABLE_DONE_EVENT: u8 = 0x04;
 pub const GAP_LINK_ESTABLISHED_EVENT: u8 = 0x05;
 pub const GAP_LINK_TERMINATED_EVENT: u8 = 0x06;
 pub const GAP_LINK_PARAM_UPDATE_EVENT: u8 = 0x07;
+/// A scan request was received (if TGAP_ADV_SCAN_REQ_NOTIFY is set)
+pub const GAP_SCAN_REQUEST_EVENT: u8 = 0x19;
 
 /// GAP role state. Bits [3:0] are the advertising state.
 pub type gapRole_States_t = u32;
@@ -136,6 +140,17 @@ pub struct gapTerminateLinkEvent_t {
 
 const _: () = assert!(core::mem::offset_of!(gapTerminateLinkEvent_t, reason) == 6);
 
+/// GAP_SCAN_REQUEST_EVENT
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct gapScanReqReseiveEvent_t {
+    pub hdr: tmos_event_hdr_t,
+    pub opcode: u8,
+    pub advHandle: u8,
+    pub scannerAddrType: u8,
+    pub scannerAddr: [u8; B_ADDR_LEN],
+}
+
 /// GAP role event. Only the members used so far are included, so only access it
 /// through a pointer from the library.
 #[repr(C)]
@@ -145,6 +160,7 @@ pub union gapRoleEvent_t {
     pub linkCmpl: gapEstLinkReqEvent_t,
     pub linkUpdate: gapLinkUpdateEvent_t,
     pub linkTerminate: gapTerminateLinkEvent_t,
+    pub scanReqEvt: gapScanReqReseiveEvent_t,
 }
 
 /* GAP Role callbacks */

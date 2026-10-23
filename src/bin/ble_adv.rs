@@ -1,8 +1,10 @@
 //! Simple BLE advertiser (port of the CH32V20x EVT `BLE/Broadcaster` example).
 //!
-//! Advertises scannable (not connectable) as "ch32v208" with scan response
-//! "Broadcaster", every 100ms. The EVT uses non-connectable advertising; scannable
-//! also exercises the scan request/response path. TMOS runs in the `ble` embassy task alongside a `tick` task.
+//! Advertises scannable (not connectable) every 100ms: the advertising packet
+//! carries WCH manufacturer data and the short name "ch32v208-adv", the scan
+//! response the complete name "ch32v208-advertiser". The EVT uses
+//! non-connectable advertising; scannable also exercises the scan
+//! request/response path. TMOS runs in the `ble` embassy task alongside a `tick` task.
 
 #![no_std]
 #![no_main]
@@ -12,52 +14,16 @@ use ch32_hal::rcc::*;
 use ch32_hal::time::Hertz;
 use ch32v208_ble::ble;
 use ch32v208_ble::ble::ffi::*;
+use ch32v208_ble::ble::adv::AdvData;
 use ch32v208_ble::ble::gap::*;
 
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 
-// GAP - Advertisement data (max size = 31 bytes)
-static ADVERT_DATA: [u8; 18] = [
-    0x02, // length of this data
-    GAP_ADTYPE_FLAGS,
-    GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
-    0x04, // length of this data
-    GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-    0xD7,
-    0x07, // 0x07D7, Nanjing Qinheng Microelectronics Co., Ltd.
-    0x01,
-    0x09, // length of this data
-    GAP_ADTYPE_LOCAL_NAME_SHORT,
-    b'c',
-    b'h',
-    b'3',
-    b'2',
-    b'v',
-    b'2',
-    b'0',
-    b'8',
-];
-
-// GAP - Scan response data (max size = 31 bytes)
-static SCAN_RSP_DATA: [u8; 16] = [
-    0x0c, // length of this data
-    GAP_ADTYPE_LOCAL_NAME_COMPLETE,
-    b'B',
-    b'r',
-    b'o',
-    b'a',
-    b'd',
-    b'c',
-    b'a',
-    b's',
-    b't',
-    b'e',
-    b'r',
-    0x02, // length of this data
-    GAP_ADTYPE_POWER_LEVEL,
-    0, // 0dBm
-];
+const SHORT_NAME: &str = "ch32v208-adv";
+const NAME: &str = "ch32v208-advertiser";
+/// Nanjing Qinheng Microelectronics Co., Ltd. (WCH)
+const WCH_COMPANY_ID: u16 = 0x07D7;
 
 /// Advertising interval in 0.625ms units (100ms)
 const ADVERTISING_INTERVAL: u16 = 160;
@@ -90,16 +56,15 @@ fn broadcaster_init() -> bStatus_t {
             &raw const advertising_enable as _,
         )?;
         GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, 1, &raw const adv_event_type as _)?;
-        GAPRole_SetParameter(
-            GAPROLE_SCAN_RSP_DATA,
-            SCAN_RSP_DATA.len() as u16,
-            SCAN_RSP_DATA.as_ptr() as _,
-        )?;
-        GAPRole_SetParameter(
-            GAPROLE_ADVERT_DATA,
-            ADVERT_DATA.len() as u16,
-            ADVERT_DATA.as_ptr() as _,
-        )?;
+        let adv = AdvData::new()
+            .flags(GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED)
+            .manufacturer(WCH_COMPANY_ID, &[0x01])
+            .short_name(SHORT_NAME);
+        let scan_rsp = AdvData::new().name(NAME).tx_power(0);
+        // The library copies the data
+        let (adv, scan_rsp) = (adv.as_slice(), scan_rsp.as_slice());
+        GAPRole_SetParameter(GAPROLE_ADVERT_DATA, adv.len() as u16, adv.as_ptr() as _)?;
+        GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, scan_rsp.len() as u16, scan_rsp.as_ptr() as _)?;
 
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MIN, ADVERTISING_INTERVAL)?;
         GAP_SetParamValue(TGAP_DISC_ADV_INT_MAX, ADVERTISING_INTERVAL)?;

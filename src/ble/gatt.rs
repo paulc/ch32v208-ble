@@ -32,6 +32,8 @@ pub const ATT_MTU_UPDATED_EVENT: u8 = 0x7F;
 
 /* ATT_ERR_CODE_DEFINES */
 pub const ATT_ERR_INVALID_HANDLE: u8 = 0x01;
+pub const ATT_ERR_READ_NOT_PERMITTED: u8 = 0x02;
+pub const ATT_ERR_WRITE_NOT_PERMITTED: u8 = 0x03;
 pub const ATT_ERR_INVALID_OFFSET: u8 = 0x07;
 pub const ATT_ERR_ATTR_NOT_FOUND: u8 = 0x0A;
 pub const ATT_ERR_ATTR_NOT_LONG: u8 = 0x0B;

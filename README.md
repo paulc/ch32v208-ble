@@ -20,13 +20,18 @@ constants differ (`bleConfig_t`, `bleClockConfig_t`, `LL_TX_POWEER_*`).
 | `src/ble/ffi.rs` | Hand-written bindings for `wchble.h`: library init, TMOS, status codes |
 | `src/ble/gap.rs` | GAP bindings: parameters, events, Broadcaster/Peripheral roles, bond manager |
 | `src/ble/gatt.rs` | GATT server bindings: attribute tables, services, CCC, notifications, GGS, linkDB |
+| `src/ble/gatt_server.rs` | Helper: services/characteristics as statics with read/write/subscribe callbacks; builds the attribute table, routes callbacks; `notify()`, `notify_all()`, `wait_subscribed()`. Module docs explain the manual process |
+| `src/ble/adv.rs` | `AdvData` builder for advertising / scan response data |
+| `src/ble/peripheral.rs` | Helper: Peripheral role setup (`start()`), connection events (`next_event()`, optionally scan requests); re-exports `AdvData` |
 | `src/ble/irq.rs` | `BB` and `RTC_ALARM` handlers; `LLE` + ecall handlers ported from `vendor/ble_task_scheduler.S` |
 | `src/ble/rtc.rs` | RTC on LSE (16384Hz counter) as the TMOS timebase, and its alarm |
 | `src/fault.rs` | `fault_handlers!()`: print exceptions (`mcause`/`mepc`/`ra`) and unexpected interrupts over SDI |
 | `src/bin/ble_adv.rs` | Scannable advertiser (EVT `Broadcaster`) |
-| `src/bin/ble_peripheral.rs` | Connectable peripheral with a GATT service (EVT `Peripheral`) |
+| `src/bin/ble_peripheral.rs` | Connectable peripheral with a GATT service (EVT `Peripheral`), using the helpers |
+| `src/bin/ble_peripheral_raw.rs` | The same peripheral wired up by hand with the raw bindings |
 | `src/bin/tick.rs` | Minimal embassy test application (no BLE) |
-| `build.rs` | Links the library; adds the `ble_common.x` linker fragment |
+| `build.rs` | Links the library and selects `ble-link.x` |
+| `ble-link.x` | Linker script: qingke-rt's `link.x` with `.highcode` first and `COMMON` in `.bss` (see below) |
 | `util/wlink-remote` | Cargo runner: flashes via `wlink` on a remote host over ssh |
 
 ## Usage
@@ -35,9 +40,56 @@ constants differ (`bleConfig_t`, `bleClockConfig_t`, `LL_TX_POWEER_*`).
 let mut config = ble::Config::default(); // factory MAC, 0dBm, 1 peripheral + 1 central
 config.mac_addr = ble::MacAddress::random(); // optional, e.g. to avoid cached names
 ble::init(config)?;
-// GAP role / GATT setup (see the examples), then:
-spawner.spawn(ble_task().unwrap()); // async task calling ble::run().await
 ```
+
+A peripheral with a GATT service, using `ble::gatt_server` and `ble::peripheral`
+(see `src/bin/ble_peripheral.rs`):
+
+```rust
+static DATA: Characteristic = Characteristic::new(Uuid::u16(0xFFE1), GATT_PROP_READ | GATT_PROP_WRITE)
+    .description("Data")
+    .on_read(&|_conn, buf| { /* fill buf */ Ok(len) })
+    .on_write(&|_conn, data| { /* use data */ Ok(()) });
+static COUNTER: Characteristic = Characteristic::new(Uuid::u16(0xFFE2), GATT_PROP_READ | GATT_PROP_NOTIFY)
+    .on_read(&read_counter)
+    .on_subscribe(&|_conn, enabled| { /* ... */ });
+static SERVICE: Service = Service::new(Uuid::u16(0xFFE0), &[&DATA, &COUNTER]);
+
+let adv = AdvData::new()
+    .flags(GAP_ADTYPE_FLAGS_GENERAL | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED)
+    .uuid16_list(&[0xFFE0])
+    .short_name("ch32v208-per");
+let scan_rsp = AdvData::new().name("ch32v208-peripheral");
+peripheral::start(&peripheral::Config::new("ch32v208-peripheral", &adv, &scan_rsp), &[&SERVICE])?;
+spawner.spawn(ble_task().unwrap()); // async task calling ble::run().await
+
+loop {
+    match peripheral::next_event().await {
+        Event::Connected { handle, .. } => { /* ... */ }
+        Event::Disconnected { .. } => { /* advertising restarts automatically */ }
+        _ => {}
+    }
+}
+
+// Notifications, e.g. from a task per data source (no connection tracking):
+loop {
+    gatt_server::wait_subscribed(&COUNTER).await?; // optional: pause while nobody listens
+    Timer::after_secs(1).await;
+    if !gatt_server::is_subscribed_any(&COUNTER) {
+        continue;                                  // unsubscribed during the sleep
+    }
+    gatt_server::notify_all(&COUNTER, &value)?;    // every subscribed connection
+}
+```
+
+`gatt_server::notify(conn, &ch, data)` notifies one connection;
+`is_subscribed(conn, &ch)` / `is_subscribed_any(&ch)` check subscriptions.
+
+Callbacks can be closures or `fn`s, and run inside TMOS (keep them short).
+Limits: single-packet reads and writes, at most `MAX_ATTRIBUTES` (48) rows,
+`MAX_SERVICES` (4) services and `MAX_NOTIFY` (8) notifying characteristics.
+For the manual process (attribute table layout, callbacks, notifications),
+see the `ble::gatt_server` module docs and `ble_peripheral_raw`.
 
 `ble::STATS` counts TMOS passes and BB/LLE/deferred/RTC alarm interrupts, and
 prints with `{}`.
@@ -53,8 +105,10 @@ sleep does the same from `main`).
 GAP/GATT callbacks run inside TMOS, in the `ble` task. The library is not
 re-entrant, so call it from thread level only (embassy tasks or TMOS
 callbacks); all tasks share one cooperative executor, so calls never overlap.
-In `ble_peripheral` the callbacks only update attribute values and post events
-to an embassy `Channel`; an `app` task handles them and sends notifications.
+In `ble_peripheral` the callbacks only update state and signal the main task,
+which logs; `ble::peripheral` delivers GAP events through an embassy `Channel`
+(`next_event()`), and a separate `counter_task` produces the notifications
+(`wait_subscribed` / `notify_all`), independent of connections.
 
 ### Interrupt-driven controller (`irqEnable`)
 
@@ -95,14 +149,25 @@ of the RF (RFEND) with interrupts enabled, which races with the interrupt-driven
 controller: connectable advertising stalled. The executor spins anyway, so it
 gained nothing; low power needs a proper sleep integration.
 
-### Library common symbols
+### Linker script (`ble-link.x`)
 
-`libwchble.a` keeps 86 variables as C common symbols. qingke-rt's `link.x`
-only zeroes `.sbss`/`.bss` (`_sbss.._ebss`), and lld appends `COMMON` after
-that, so after a warm reset (e.g. wlink flash) the library started with stale
-state from the previous firmware (seen as a jump through a stale function
-pointer). `build.rs` adds `ble_common.x`, which collects `COMMON` into
-`.ble_common`, and `ble::init` zeroes it first.
+A copy of qingke-rt's `link.x` (no `highcode` feature) with two changes:
+
+- `.highcode` first in flash, before `.text`, as in WCH's `Link.ld`. The
+  library marks its time-critical code `.highcode` (BB/LLE interrupt paths,
+  RX/TX waits, connection events). Only the first 128KB of flash is zero-wait
+  (with 64KB RAM); qingke-rt puts `.highcode` at the end of `.text`, which in
+  a ~170KB image is slow flash. Connectable advertising then sent no scan
+  responses (no name in scanners): the BB interrupt has to answer a scan
+  request within the 150us reply window. With `.highcode` first, scan
+  responses work and TMOS runs ~14x faster.
+- `COMMON` in `.bss`. `libwchble.a` keeps 86 variables as C common symbols;
+  qingke-rt does not list `COMMON`, so lld put them after `_ebss`, where they
+  were not zeroed at reset. After a warm reset (e.g. wlink flash) the library
+  started with stale state from the previous firmware (seen as a jump through
+  a stale function pointer).
+
+Keep it in sync with qingke-rt when updating that crate.
 
 ## Hardware assumptions
 
@@ -120,33 +185,44 @@ locally attached probe use the commented-out `wlink` runner instead.
 
 ```
 cargo run --release --bin ble_adv
-cargo run --release --bin ble_peripheral
+cargo run --release --bin ble_peripheral      # or ble_peripheral_raw
 ```
 
 ### ble_adv
 
-Advertises scannable (not connectable) as `ch32v208` with WCH manufacturer
-data and scan response `Broadcaster`, every 100ms. Prints `tick: n` with
+Advertises scannable (not connectable) every 100ms: WCH manufacturer data and
+short name `ch32v208-adv`, scan response with the complete name
+`ch32v208-advertiser`. Prints `tick: n` with
 `ble::STATS` every 5s.
 
 Tested: advertising and scan response seen in nRF Connect and `blescan`.
 
 ### ble_peripheral
 
-Advertises as `ch32v208 Peripheral` with service `0xFFE0`:
+Advertises as `ch32v208-per` (short name) / `ch32v208-peripheral` (complete
+name, in the scan response) with service `0xFFE0`:
 
 - `0xFFE1` "Data": read/write, up to 20 bytes (writes are logged)
-- `0xFFE2` "Counter": read/notify, u32 LE, incremented every second and
-  notified while notifications are enabled
+- `0xFFE2` "Counter": read/notify, u32 LE, incremented and notified every
+  second while a client has notifications enabled (a `counter_task` using
+  `wait_subscribed` / `notify_all`)
 
 Logs connections (with peer address), disconnections, MTU and parameter
 updates, writes and notification state; prints `ble::STATS` every 10s.
 Advertising restarts after a disconnect.
 
-Tested with `blescan` (macOS): enumerate, read, write and notify work;
+`ble_peripheral_raw` provides the same service wired up by hand, advertising as
+`ch32v208 Peripheral` (complete name in the scan response only); its counter
+runs continuously and is notified to the connected client while subscribed.
+
+Tested with `blescan` (macOS, both versions): scan response (name), enumerate,
+read, write and notify work;
 connections run at a 30ms interval with ~33 RTC alarm interrupts/s.
 macOS caches device names per address, so a scanner may show an old name
-(`MacAddress::random()` avoids this).
+(`MacAddress::random()` avoids this). CoreBluetooth reports a device on its
+first advertising packet, before the scan response, then updates it: the
+examples put a short name in the advertising packet (shown first) and the
+complete name in the scan response (shown after the update).
 
 ## Not done yet
 

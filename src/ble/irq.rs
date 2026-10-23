@@ -36,7 +36,7 @@ pub static mut g_LLE_IRQLibHandlerLocation: u32 = 0;
 
 core::arch::global_asm!(
     r#"
-    .section .text.ble_ecall_handler,"ax",@progbits
+    .section .highcode.ble_ecall_handler,"ax",@progbits
     .global MachineEnvCall
     .align 2
 MachineEnvCall:
@@ -86,7 +86,7 @@ MachineEnvCall:
 
     mret
 
-    .section .text.ble_lle_handler,"ax",@progbits
+    .section .highcode.ble_lle_handler,"ax",@progbits
     .global LLE
     .align 2
 LLE:

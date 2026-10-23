@@ -28,9 +28,12 @@
 //! Setup mirrors `HAL/MCU.c` (`WCHBLE_Init`, `HAL_Init`) and `HAL/RTC.c` from the
 //! CH32V20x EVT (openwch/ch32v20x `EVT/EXAM/BLE`).
 
+pub mod adv;
 pub mod ffi;
 pub mod gap;
 pub mod gatt;
+pub mod gatt_server;
+pub mod peripheral;
 mod irq;
 pub mod rtc;
 
@@ -144,8 +147,6 @@ impl Default for Config {
 /// used for the LSE start-up timeout). Call the GAP role init functions after
 /// this, then spawn [`run`].
 pub fn init(config: Config) -> Result<(), Error> {
-    zero_common_symbols();
-
     if !lib_version().starts_with(VER_FILE) {
         return Err(Error::LibVersion);
     }
@@ -211,20 +212,6 @@ pub fn init(config: Config) -> Result<(), Error> {
     }
 
     Ok(())
-}
-
-/// Zero the library's C common symbols (see build.rs): they are outside the
-/// range zeroed at reset, so would otherwise keep values from before a reset.
-fn zero_common_symbols() {
-    unsafe extern "C" {
-        static mut __ble_common_start: u8;
-        static mut __ble_common_end: u8;
-    }
-    unsafe {
-        let start = &raw mut __ble_common_start;
-        let len = (&raw mut __ble_common_end as usize) - (start as usize);
-        core::ptr::write_bytes(start, 0, len);
-    }
 }
 
 /// Run TMOS forever, yielding to other tasks between passes. Spawn this in an
