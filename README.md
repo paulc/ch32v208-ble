@@ -30,8 +30,8 @@ constants differ (`bleConfig_t`, `bleClockConfig_t`, `LL_TX_POWEER_*`).
 | `src/bin/ble_peripheral.rs` | Connectable peripheral with a GATT service (EVT `Peripheral`), using the helpers |
 | `src/bin/ble_peripheral_raw.rs` | The same peripheral wired up by hand with the raw bindings |
 | `src/bin/tick.rs` | Minimal embassy test application (no BLE) |
-| `build.rs` | Links the library and selects `ble-link.x` |
-| `ble-link.x` | Linker script: qingke-rt's `link.x` with `.highcode` first and `COMMON` in `.bss` (see below) |
+| `build.rs` | Links the library; selects `ble-link.x`, or with the `highcode` feature qingke-rt's `link.x` plus a `ble_common.x` fragment |
+| `ble-link.x` | Default linker script: qingke-rt's `link.x` with `.highcode` first and `COMMON` in `.bss` (see below) |
 | `util/wlink-remote` | Cargo runner: flashes via `wlink` on a remote host over ssh |
 
 ## Usage
@@ -149,25 +149,34 @@ of the RF (RFEND) with interrupts enabled, which races with the interrupt-driven
 controller: connectable advertising stalled. The executor spins anyway, so it
 gained nothing; low power needs a proper sleep integration.
 
-### Linker script (`ble-link.x`)
+### Memory layout: `.highcode` and the library's common symbols
 
-A copy of qingke-rt's `link.x` (no `highcode` feature) with two changes:
+The library marks its time-critical code `.highcode` (BB/LLE interrupt paths,
+RX/TX waits, connection events). Only the first 128KB of flash is zero-wait
+(with 64KB RAM), and qingke-rt's plain `link.x` puts `.highcode` at the end of
+`.text`, which in a ~170KB image is slow flash. The BB interrupt then missed
+the 150us reply window: connectable advertising sent no scan responses (no name
+in scanners).
 
-- `.highcode` first in flash, before `.text`, as in WCH's `Link.ld`. The
-  library marks its time-critical code `.highcode` (BB/LLE interrupt paths,
-  RX/TX waits, connection events). Only the first 128KB of flash is zero-wait
-  (with 64KB RAM); qingke-rt puts `.highcode` at the end of `.text`, which in
-  a ~170KB image is slow flash. Connectable advertising then sent no scan
-  responses (no name in scanners): the BB interrupt has to answer a scan
-  request within the 150us reply window. With `.highcode` first, scan
-  responses work and TMOS runs ~14x faster.
-- `COMMON` in `.bss`. `libwchble.a` keeps 86 variables as C common symbols;
-  qingke-rt does not list `COMMON`, so lld put them after `_ebss`, where they
-  were not zeroed at reset. After a warm reset (e.g. wlink flash) the library
-  started with stale state from the previous firmware (seen as a jump through
-  a stale function pointer).
+`libwchble.a` also keeps 86 variables as C common symbols. qingke-rt's `link.x`
+does not list `COMMON`, so lld put them after `_ebss`, where they were not
+zeroed at reset: after a warm reset (e.g. wlink flash) the library started with
+stale state from the previous firmware (seen as a jump through a stale function
+pointer).
 
-Keep it in sync with qingke-rt when updating that crate.
+Two layouts handle both, selected by the `highcode` cargo feature:
+
+| | Default | `--features highcode` |
+|---|---|---|
+| `.highcode` runs from | zero-wait flash, placed first (as WCH's `Link.ld`) | RAM, copied at startup (with the vector table and interrupt handlers) |
+| Linker script | `ble-link.x`: a copy of qingke-rt's `link.x` | qingke-rt's `link.x` (ch32-hal/qingke-rt `highcode` feature) |
+| Common symbols | `COMMON` in `.bss`, zeroed at reset | `ble_common.x` fragment (`INSERT AFTER .bss`), zeroed by `ble::init` |
+| RAM | no extra | ~13KB extra |
+| Zero-wait flash | ~12KB used by `.highcode` | freed |
+| Maintenance | keep `ble-link.x` in sync with qingke-rt | follows qingke-rt |
+
+Both are tested on hardware (scan responses, connections, GATT). TMOS ran
+~1.8M passes/10s with the default and ~1.61M with `highcode`.
 
 ## Hardware assumptions
 
@@ -186,6 +195,7 @@ locally attached probe use the commented-out `wlink` runner instead.
 ```
 cargo run --release --bin ble_adv
 cargo run --release --bin ble_peripheral      # or ble_peripheral_raw
+cargo run --release --bin ble_peripheral --features highcode   # .highcode in RAM
 ```
 
 ### ble_adv

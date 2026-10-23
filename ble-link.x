@@ -15,8 +15,8 @@
  *    _ebss, where they were not zeroed at reset and kept stale values across a
  *    warm reset.
  *
- * Used via build.rs (`-Tble-link.x` instead of `-Tlink.x`). Keep in sync with
- * qingke-rt when updating it.
+ * Used via build.rs (`-Tble-link.x` instead of `-Tlink.x`) unless the
+ * `highcode` feature is enabled. Keep in sync with qingke-rt when updating it.
  */
 
 INCLUDE memory.x

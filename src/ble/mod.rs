@@ -147,6 +147,9 @@ impl Default for Config {
 /// used for the LSE start-up timeout). Call the GAP role init functions after
 /// this, then spawn [`run`].
 pub fn init(config: Config) -> Result<(), Error> {
+    #[cfg(feature = "highcode")]
+    zero_common_symbols();
+
     if !lib_version().starts_with(VER_FILE) {
         return Err(Error::LibVersion);
     }
@@ -212,6 +215,23 @@ pub fn init(config: Config) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// With the `highcode` feature, zero the library's C common symbols (see
+/// build.rs, `ble_common.x`): they are outside the range zeroed at reset, so
+/// would otherwise keep values from before a (warm) reset. (By default
+/// ble-link.x places them in .bss.)
+#[cfg(feature = "highcode")]
+fn zero_common_symbols() {
+    unsafe extern "C" {
+        static mut __ble_common_start: u8;
+        static mut __ble_common_end: u8;
+    }
+    unsafe {
+        let start = &raw mut __ble_common_start;
+        let len = (&raw mut __ble_common_end as usize) - (start as usize);
+        core::ptr::write_bytes(start, 0, len);
+    }
 }
 
 /// Run TMOS forever, yielding to other tasks between passes. Spawn this in an

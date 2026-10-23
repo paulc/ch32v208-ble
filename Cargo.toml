@@ -6,6 +6,12 @@ edition = "2024"
 [lib]
 name = "ch32v208_ble"
 
+[features]
+# Run .highcode (the BLE library's time-critical code), the vector table and
+# interrupt handlers from RAM (~13KB) using qingke-rt's link.x, instead of
+# placing .highcode first in zero-wait flash with ble-link.x (default).
+highcode = ["ch32-hal/highcode"]
+
 [dependencies]
 qingke = "0.8"
 qingke-rt = "0.8"
