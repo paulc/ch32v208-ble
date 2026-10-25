@@ -33,8 +33,8 @@ pub mod ffi;
 pub mod gap;
 pub mod gatt;
 pub mod gatt_server;
-pub mod peripheral;
 mod irq;
+pub mod peripheral;
 pub mod rtc;
 
 use core::ffi::CStr;
@@ -67,8 +67,29 @@ const BLE_CALIBRATION_PERIOD_MS: u32 = 120_000;
 /// OSC registers (not in the ch32-metapac CH32V208 PAC)
 const OSC_HSE_CAL_CTRL: *mut u32 = 0x4002_202C as *mut u32;
 
-
-/// Event counters, for diagnostics
+/// Event counters, for diagnostics.
+///
+/// Displayed as `tmos=.. bb=.. lle=.. deferred=.. alarm=.. rtc=..`:
+///
+/// - `tmos`: `TMOS_SystemProcess` calls from [`run`], i.e. how often TMOS got
+///   CPU time. Not a time base: it rises as fast as the executor loops
+///   (≈180k/s at 96MHz)
+/// - `bb`: baseband (radio) interrupts: packet sent/received, radio state
+/// - `lle`: link-layer engine interrupts, counted on handler entry
+/// - `deferred`: ecall traps, i.e. work the library defers from the LLE
+///   interrupt (the `irqEnable` mechanism)
+/// - `alarm`: RTC alarm interrupts driving TMOS timers
+///   (`TMOS_TimerIRQHandler`): advertising and connection event timing.
+///   Normally tracks `deferred` closely
+/// - `rtc`: raw RTC counter (16384Hz). The RTC is in the backup domain and
+///   keeps counting across warm resets, so it is only uptime after a power
+///   cycle or backup domain reset; the other counters start at 0 at boot
+///
+/// Compare successive values rather than totals: if `tmos` stops rising,
+/// `run` isn't being scheduled; if `alarm` stops, TMOS timers have stalled; if
+/// `bb` stays flat while advertising, the radio isn't transmitting. Counters
+/// are `u32` and wrap (`tmos` after ≈6.7h), so use wrapping subtraction for
+/// rates.
 pub struct Stats {
     /// `TMOS_SystemProcess` calls
     pub tmos_passes: AtomicU32,
@@ -87,7 +108,10 @@ pub static STATS: Stats = Stats {
 
 /// Increment a counter. No atomic RMW on riscv32imc, but each counter has a single writer.
 fn count(counter: &AtomicU32) {
-    counter.store(counter.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+    counter.store(
+        counter.load(Ordering::Relaxed).wrapping_add(1),
+        Ordering::Relaxed,
+    );
 }
 
 impl core::fmt::Display for Stats {
@@ -246,7 +270,9 @@ pub async fn run() -> ! {
 
 /// Library version, e.g. "CH32V20x_BLE_LIB_V1.4"
 pub fn lib_version() -> &'static str {
-    unsafe { CStr::from_ptr(VER_LIB.as_ptr().cast()) }.to_str().unwrap_or("?")
+    unsafe { CStr::from_ptr(VER_LIB.as_ptr().cast()) }
+        .to_str()
+        .unwrap_or("?")
 }
 
 /// `srandCB`: random seed
@@ -267,7 +293,11 @@ unsafe extern "C" fn hal_process_event(task_id: tmosTaskID, events: tmosEvents) 
         if events & HAL_REG_INIT_EVENT != 0 {
             // Calibrate RF
             BLE_RegInit();
-            tmos_start_task(task_id, HAL_REG_INIT_EVENT, MS1_TO_SYSTEM_TIME(BLE_CALIBRATION_PERIOD_MS));
+            tmos_start_task(
+                task_id,
+                HAL_REG_INIT_EVENT,
+                MS1_TO_SYSTEM_TIME(BLE_CALIBRATION_PERIOD_MS),
+            );
             return events ^ HAL_REG_INIT_EVENT;
         }
     }
@@ -327,4 +357,3 @@ impl core::fmt::Display for MacAddress {
         )
     }
 }
-
