@@ -18,7 +18,7 @@
 
 use core::ffi::c_void;
 
-use ch32_hal::println;
+use ch32_hal::try_println;
 use ch32_hal::rcc::*;
 use ch32_hal::time::Hertz;
 use ch32v208_ble::ble;
@@ -276,7 +276,7 @@ static EVENTS: Channel<CriticalSectionRawMutex, AppEvent, 8> = Channel::new();
 
 fn send_event(event: AppEvent) {
     if EVENTS.try_send(event).is_err() {
-        println!("event dropped");
+        try_println!("event dropped");
     }
 }
 
@@ -286,8 +286,8 @@ unsafe extern "C" fn state_change(new_state: gapRole_States_t, event: *mut gapRo
     let event = unsafe { &*event };
     let opcode = unsafe { event.gap.opcode };
     match (new_state & GAPROLE_STATE_ADV_MASK, opcode) {
-        (GAPROLE_STARTED, _) => println!("Initialized.."),
-        (GAPROLE_ADVERTISING, GAP_MAKE_DISCOVERABLE_DONE_EVENT) => println!("Advertising.."),
+        (GAPROLE_STARTED, _) => try_println!("Initialized.."),
+        (GAPROLE_ADVERTISING, GAP_MAKE_DISCOVERABLE_DONE_EVENT) => try_println!("Advertising.."),
         (GAPROLE_CONNECTED, GAP_LINK_ESTABLISHED_EVENT) => {
             let link = unsafe { &event.linkCmpl };
             send_event(AppEvent::Connected {
@@ -306,9 +306,9 @@ unsafe extern "C" fn state_change(new_state: gapRole_States_t, event: *mut gapRo
             let enable: u8 = 1;
             let _ = unsafe { GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, 1, &raw const enable as _) };
         }
-        (GAPROLE_WAITING, GAP_END_DISCOVERABLE_DONE_EVENT) => println!("Waiting for advertising.."),
-        (GAPROLE_ERROR, _) => println!("Error.."),
-        (state, opcode) => println!("GAP state {:#x} opcode {:#x}", state, opcode),
+        (GAPROLE_WAITING, GAP_END_DISCOVERABLE_DONE_EVENT) => try_println!("Waiting for advertising.."),
+        (GAPROLE_ERROR, _) => try_println!("Error.."),
+        (state, opcode) => try_println!("GAP state {:#x} opcode {:#x}", state, opcode),
     }
 }
 
@@ -410,7 +410,7 @@ async fn app_task() -> ! {
         match select(EVENTS.receive(), ticker.next()).await {
             Either::First(event) => match event {
                 AppEvent::Connected { handle, interval, peer } => {
-                    println!(
+                    try_println!(
                         "Connected: handle {:#x}, interval {} x 1.25ms, peer {}",
                         handle,
                         interval,
@@ -419,17 +419,17 @@ async fn app_task() -> ! {
                     conn = Some(handle);
                 }
                 AppEvent::Disconnected { handle, reason } => {
-                    println!("Disconnected: handle {:#x}, reason {:#x}", handle, reason);
+                    try_println!("Disconnected: handle {:#x}, reason {:#x}", handle, reason);
                     conn = None;
                     notify = false;
                 }
                 AppEvent::ParamUpdate { handle, interval } => {
-                    println!("Param update: handle {:#x}, interval {} x 1.25ms", handle, interval);
+                    try_println!("Param update: handle {:#x}, interval {} x 1.25ms", handle, interval);
                 }
-                AppEvent::Mtu(mtu) => println!("MTU: {}", mtu),
-                AppEvent::DataWritten(data) => println!("Data written: {:02x?}", data.as_slice()),
+                AppEvent::Mtu(mtu) => try_println!("MTU: {}", mtu),
+                AppEvent::DataWritten(data) => try_println!("Data written: {:02x?}", data.as_slice()),
                 AppEvent::Notify(enabled) => {
-                    println!("Counter notifications {}", if enabled { "on" } else { "off" });
+                    try_println!("Counter notifications {}", if enabled { "on" } else { "off" });
                     notify = enabled;
                 }
             },
@@ -439,7 +439,7 @@ async fn app_task() -> ! {
                 if let (Some(handle), true) = (conn, notify)
                     && let Err(e) = notify_counter(handle)
                 {
-                    println!("notify failed: {:#x}", e.get());
+                    try_println!("notify failed: {:#x}", e.get());
                 }
             }
         }
@@ -481,11 +481,11 @@ async fn main(spawner: Spawner) -> ! {
     };
     let _p = ch32_hal::init(config);
 
-    println!("BLE peripheral on ch32v208");
-    println!("BLE lib: {}", ble::lib_version());
+    try_println!("BLE peripheral on ch32v208");
+    try_println!("BLE lib: {}", ble::lib_version());
 
     let ble_config = ble::Config::default();
-    println!("MAC: {}", ble_config.mac_addr);
+    try_println!("MAC: {}", ble_config.mac_addr);
 
     if let Err(e) = ble::init(ble_config) {
         panic!("ble::init: {:?}", e);
@@ -500,7 +500,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut ticker = Ticker::every(Duration::from_secs(10));
     loop {
         ticker.next().await;
-        println!("{}", ble::STATS);
+        try_println!("{}", ble::STATS);
     }
 }
 
@@ -508,6 +508,6 @@ ch32v208_ble::fault_handlers!();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    ch32_hal::println!("\n\n\n{}", info);
+    ch32_hal::try_println!("\n\n\n{}", info);
     loop {}
 }

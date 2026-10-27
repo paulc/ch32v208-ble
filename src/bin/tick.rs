@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use ch32_hal::println;
+use ch32_hal::try_println;
 use ch32_hal::rcc::*;
 use ch32_hal::time::Hertz;
 
@@ -36,20 +36,20 @@ async fn main(_spawner: Spawner) -> ! {
     };
     let _p = ch32_hal::init(config);
 
-    println!("Hello from ch32v208!");
-    println!("CHIP: {}", ch32_hal::signature::chip_id().name());
-    println!("Clocks: {:?}", ch32_hal::rcc::clocks());
+    try_println!("Hello from ch32v208!");
+    try_println!("CHIP: {}", ch32_hal::signature::chip_id().name());
+    try_println!("Clocks: {:?}", ch32_hal::rcc::clocks());
 
     let mut tick = 0u32;
     loop {
         Timer::after_millis(1000).await;
         tick += 1;
-        println!("tick: {}", tick);
+        try_println!("tick: {}", tick);
     }
 }
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    ch32_hal::println!("\n\n\n{}", info);
+    ch32_hal::try_println!("\n\n\n{}", info);
     loop {}
 }

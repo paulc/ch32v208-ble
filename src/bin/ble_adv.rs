@@ -9,7 +9,7 @@
 #![no_std]
 #![no_main]
 
-use ch32_hal::println;
+use ch32_hal::try_println;
 use ch32_hal::rcc::*;
 use ch32_hal::time::Hertz;
 use ch32v208_ble::ble;
@@ -35,11 +35,11 @@ static BROADCASTER_CBS: gapRolesBroadcasterCBs_t = gapRolesBroadcasterCBs_t {
 
 unsafe extern "C" fn broadcaster_state(new_state: gapRole_States_t) {
     match new_state & GAPROLE_STATE_ADV_MASK {
-        GAPROLE_STARTED => println!("Initialized.."),
-        GAPROLE_ADVERTISING => println!("Advertising.."),
-        GAPROLE_WAITING => println!("Waiting for advertising.."),
-        GAPROLE_ERROR => println!("Error.."),
-        _ => println!("Broadcaster state: {:#x}", new_state),
+        GAPROLE_STARTED => try_println!("Initialized.."),
+        GAPROLE_ADVERTISING => try_println!("Advertising.."),
+        GAPROLE_WAITING => try_println!("Waiting for advertising.."),
+        GAPROLE_ERROR => try_println!("Error.."),
+        _ => try_println!("Broadcaster state: {:#x}", new_state),
     }
 }
 
@@ -84,7 +84,7 @@ async fn tick_task() -> ! {
     loop {
         Timer::after_millis(5000).await;
         tick += 1;
-        println!("tick: {} {}", tick, ble::STATS);
+        try_println!("tick: {} {}", tick, ble::STATS);
     }
 }
 
@@ -118,21 +118,21 @@ async fn main(spawner: Spawner) -> ! {
     };
     let _p = ch32_hal::init(config);
 
-    println!("BLE advertiser on ch32v208");
-    println!("Clocks: {:?}", ch32_hal::rcc::clocks());
-    println!("BLE lib: {}", ble::lib_version());
+    try_println!("BLE advertiser on ch32v208");
+    try_println!("Clocks: {:?}", ch32_hal::rcc::clocks());
+    try_println!("BLE lib: {}", ble::lib_version());
 
     let ble_config = ble::Config::default();
-    println!("MAC: {}", ble_config.mac_addr);
+    try_println!("MAC: {}", ble_config.mac_addr);
 
     if let Err(e) = ble::init(ble_config) {
         panic!("ble::init: {:?}", e);
     }
-    println!("ble::init done");
+    try_println!("ble::init done");
     if let Err(e) = broadcaster_init() {
         panic!("broadcaster_init: {:?}", e);
     }
-    println!("broadcaster_init done");
+    try_println!("broadcaster_init done");
 
     spawner.spawn(ble_task().unwrap());
     spawner.spawn(tick_task().unwrap());
@@ -146,6 +146,6 @@ ch32v208_ble::fault_handlers!();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    ch32_hal::println!("\n\n\n{}", info);
+    ch32_hal::try_println!("\n\n\n{}", info);
     loop {}
 }

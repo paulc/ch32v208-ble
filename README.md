@@ -198,6 +198,17 @@ cargo run --release --bin ble_peripheral      # or ble_peripheral_raw
 cargo run --release --bin ble_peripheral --features highcode   # .highcode in RAM
 ```
 
+Notes:
+
+- Output uses `ch32_hal::try_println!`, which drops output when no debugger is
+  draining SDI print; the blocking `println!` would hang the firmware when
+  running without `wlink` attached (e.g. after a power cycle).
+- `wlink halt` / `wlink resume` while BLE is running hangs the firmware: the
+  radio keeps running while the core is halted, and after resume the library
+  busy-waits (no timeout) in `ll_advertise.c` for a radio register that never
+  clears, stalling `TMOS_SystemProcess` and the executor. Use `wlink reset` to
+  recover. An IWDG would also recover from this (not implemented).
+
 ### ble_adv
 
 Advertises scannable (not connectable) every 100ms: WCH manufacturer data and
@@ -239,5 +250,6 @@ complete name in the scan response (shown after the update).
 - SNV (bond storage in flash), temperature-triggered RF calibration (`tsCB`)
 - LSI-only operation (needs `Calibration_LSI` porting)
 - Low-power sleep
+- Independent watchdog (IWDG) to recover from library hangs
 - Pairing/bonding (needs SNV), connection parameter update requests
 - Central/observer roles, GATT client

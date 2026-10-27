@@ -18,7 +18,7 @@
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use ch32_hal::println;
+use ch32_hal::try_println;
 use ch32_hal::rcc::*;
 use ch32_hal::time::Hertz;
 use ch32v208_ble::ble;
@@ -104,7 +104,7 @@ async fn counter_task() -> ! {
         let counter = COUNTER.load(Ordering::Relaxed).wrapping_add(1);
         COUNTER.store(counter, Ordering::Relaxed);
         if let Err(e) = gatt_server::notify_all(&COUNTER_CHAR, &counter.to_le_bytes()) {
-            println!("notify failed: {:?}", e);
+            try_println!("notify failed: {:?}", e);
         }
     }
 }
@@ -113,7 +113,7 @@ async fn counter_task() -> ! {
 async fn stats_task() -> ! {
     loop {
         Timer::after_secs(10).await;
-        println!("{}", ble::STATS);
+        try_println!("{}", ble::STATS);
     }
 }
 
@@ -147,8 +147,8 @@ async fn main(spawner: Spawner) -> ! {
     };
     let _p = ch32_hal::init(config);
 
-    println!("BLE peripheral on ch32v208");
-    println!("BLE lib: {}", ble::lib_version());
+    try_println!("BLE peripheral on ch32v208");
+    try_println!("BLE lib: {}", ble::lib_version());
 
     // Use random MAC address to avoid MacOS caching
     let ble_config = ble::Config {
@@ -156,7 +156,7 @@ async fn main(spawner: Spawner) -> ! {
         ..Default::default()
     };
 
-    println!("MAC: {}", ble_config.mac_addr);
+    try_println!("MAC: {}", ble_config.mac_addr);
     if let Err(e) = ble::init(ble_config) {
         panic!("ble::init: {:?}", e);
     }
@@ -171,7 +171,7 @@ async fn main(spawner: Spawner) -> ! {
     if let Err(e) = peripheral::start(&peripheral_config, &[&SERVICE]) {
         panic!("peripheral::start: {:?}", e);
     }
-    println!("Advertising..");
+    try_println!("Advertising..");
 
     spawner.spawn(ble_task().unwrap());
     spawner.spawn(counter_task().unwrap());
@@ -181,19 +181,19 @@ async fn main(spawner: Spawner) -> ! {
         match select3(peripheral::next_event(), DATA_WRITTEN.wait(), SUBSCRIBED.wait()).await {
             Either3::First(event) => match event {
                 Event::Connected { handle, interval, peer } => {
-                    println!("Connected: handle {:#x}, interval {} x 1.25ms, peer {}", handle, interval, peer);
+                    try_println!("Connected: handle {:#x}, interval {} x 1.25ms, peer {}", handle, interval, peer);
                 }
                 Event::Disconnected { handle, reason } => {
-                    println!("Disconnected: handle {:#x}, reason {:#x}", handle, reason);
+                    try_println!("Disconnected: handle {:#x}, reason {:#x}", handle, reason);
                 }
                 Event::ParamUpdate { handle, interval, .. } => {
-                    println!("Param update: handle {:#x}, interval {} x 1.25ms", handle, interval);
+                    try_println!("Param update: handle {:#x}, interval {} x 1.25ms", handle, interval);
                 }
-                Event::Mtu { mtu, .. } => println!("MTU: {}", mtu),
-                Event::ScanRequest { peer } => println!("Scan request from {}", peer),
+                Event::Mtu { mtu, .. } => try_println!("MTU: {}", mtu),
+                Event::ScanRequest { peer } => try_println!("Scan request from {}", peer),
             },
-            Either3::Second(data) => println!("Data written: {:02x?}", data.as_slice()),
-            Either3::Third(enabled) => println!("Counter notifications {}", if enabled { "on" } else { "off" }),
+            Either3::Second(data) => try_println!("Data written: {:02x?}", data.as_slice()),
+            Either3::Third(enabled) => try_println!("Counter notifications {}", if enabled { "on" } else { "off" }),
         }
     }
 }
@@ -202,6 +202,6 @@ ch32v208_ble::fault_handlers!();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    ch32_hal::println!("\n\n\n{}", info);
+    ch32_hal::try_println!("\n\n\n{}", info);
     loop {}
 }

@@ -22,6 +22,8 @@ const PWR_CTLR_DBP: u32 = 1 << 8;
 pub enum Error {
     /// The 32.768kHz LSE did not start
     LseNotReady,
+    /// The RTC enable bit (`RCC_BDCTLR.RTCEN`) did not stay set
+    EnableTimeout,
     /// RTC register synchronisation timed out (RTC not clocked?)
     SyncTimeout,
     /// RTC write did not complete (RTC not clocked?)
@@ -69,10 +71,18 @@ fn start() -> Result<(), Error> {
 
     rcc.bdctlr().modify(|w| w.set_lseon(true));
     wait_for(|| rcc.bdctlr().read().lserdy(), Error::LseNotReady)?;
-    rcc.bdctlr().modify(|w| {
-        w.set_rtcsel(Rtcsel::LSE);
-        w.set_rtcen(true);
-    });
+    // Select the clock and enable the RTC in separate writes, as the EVT does
+    // (`RCC_RTCCLKConfig`, then `RCC_RTCCLKCmd`). After a power-on reset, setting
+    // both in one write left RTCEN clear (RTC unclocked, so the sync below never
+    // completed). Rewrite RTCEN until it reads back set.
+    rcc.bdctlr().modify(|w| w.set_rtcsel(Rtcsel::LSE));
+    wait_for(
+        || {
+            rcc.bdctlr().modify(|w| w.set_rtcen(true));
+            rcc.bdctlr().read().rtcen()
+        },
+        Error::EnableTimeout,
+    )?;
 
     // Wait for the APB1 registers to sync with the RTC domain
     rtc.ctlrl().modify(|w| w.set_rsf(false));

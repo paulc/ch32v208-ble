@@ -18,7 +18,7 @@ pub fn report_exception() {
         core::arch::asm!("csrr {}, mcause", "csrr {}, mepc", "csrr {}, mtval",
             out(reg) mcause, out(reg) mepc, out(reg) mtval);
     }
-    ch32_hal::println!(
+    ch32_hal::try_println!(
         "\n!! exception mcause={:#x} mepc={:#x} mtval={:#x} ra={:#x} sp={:#x}",
         mcause,
         mepc,
@@ -26,14 +26,14 @@ pub fn report_exception() {
         FAULT_RA.load(Ordering::Relaxed),
         FAULT_SP.load(Ordering::Relaxed)
     );
-    ch32_hal::println!("!! {}", crate::ble::STATS);
+    ch32_hal::try_println!("!! {}", crate::ble::STATS);
 }
 
 /// Print the unexpected interrupt
 pub fn report_interrupt() {
     let mcause: usize;
     unsafe { core::arch::asm!("csrr {}, mcause", out(reg) mcause) };
-    ch32_hal::println!("\n!! unhandled interrupt mcause={:#x}", mcause);
+    ch32_hal::try_println!("\n!! unhandled interrupt mcause={:#x}", mcause);
 }
 
 /// Define `Exception` (core vector 3, saving `ra`/`sp` first), `ExceptionHandler`
